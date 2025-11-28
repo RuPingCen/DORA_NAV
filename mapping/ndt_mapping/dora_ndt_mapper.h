@@ -187,6 +187,9 @@ public:
 
   cpu::NormalDistributionsTransform<pcl::PointXYZI, pcl::PointXYZI> ndt_;
 
+  pcl::PointCloud<pcl::PointXYZI> map;
+  Pose current_pose;
+
 private:
   // Setup.
   void setConfig();
@@ -208,7 +211,7 @@ private:
   Config config_;
 
   // things we'd like to calculate
-  Pose previous_pose, current_pose, added_pose;
+  Pose previous_pose, added_pose;
   Pose imu_pose, odom_pose, guess_lidar_pose, guess_base_pose;
   Pose diff_pose, offset_imu, offset_odom;
 
@@ -216,7 +219,6 @@ private:
 
   //------------------------------------------------------------------------------
  
-  pcl::PointCloud<pcl::PointXYZI> map;
   std::vector<float> b2l_tf;
   std::string lidar_frame;
 

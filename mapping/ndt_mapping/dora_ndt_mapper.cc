@@ -1,4 +1,5 @@
 #include "dora_ndt_mapper.h"
+#include <cmath>
 
 namespace ndt_mapping{
 NDTMapper::NDTMapper(){
@@ -36,9 +37,9 @@ void NDTMapper::getTF(){
 
 }
 
-void NDTMapper::points_callback(
-    const pcl::PointCloud<pcl::PointXYZI>::Ptr &input) {
-    current_scan_time = input->header.stamp;
+void NDTMapper::points_callback(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input)
+{
+  current_scan_time = input->header.stamp;
 
   // 0. filter by min and max range
   pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr = filterPoints(input);
@@ -71,10 +72,7 @@ void NDTMapper::points_callback(
 
   guess_lidar_pose.setPose(t_localizer, mat_l);
   guess_base_pose.setPose(t_base_link, mat_b);
-  current_pose = guess_base_pose;
-
-  // 4. pub tf message
-  // setTF();      
+  current_pose = guess_base_pose; 
 
   double shift = (current_pose - added_pose).calDistance();
   if (shift >= config_.min_add_scan_shift) {
@@ -89,17 +87,12 @@ void NDTMapper::points_callback(
     else
       ndt_.setInputTarget(map.makeShared()); // set for next
 
-    // ndt_.setInputTarget(map_ptr); // for pcl default lib  // ben lai jiu zhu shi diao de 
-
-    // filter for fast localization
     if (config_.save_frame_point != -1) {
       int one_scan_points_num = (*scan_ptr).size();
       int saved_points_num = one_scan_points_num * config_.save_frame_point;
 
-      // remove the mapping data to release the memory
       if (map.size() > saved_points_num) {
-        // LOG(INFO) << "Number of earse points: "
-        //           << (map.size() - saved_points_num) << " points";
+
         auto oldest = map.begin();
         auto end_num = map.begin() + (map.size() - saved_points_num);
         map.erase(oldest, end_num);
@@ -108,7 +101,7 @@ void NDTMapper::points_callback(
   }
   diff_pose = current_pose - previous_pose;
   previous_pose = current_pose;
-  // pubOtherMsgs(input); // publish msg including odom, lidar, path_vis; this is for record and visuallize in rviz
+
   if (_debug_print) {
     std::cout
         << "-----------------------------------------------------------------"
@@ -153,7 +146,7 @@ Eigen::Matrix4f NDTMapper::Pose2Matrix(const Pose &p) {
 }
 
 void NDTMapper::setConfig() {
-  std::string configfile_name = "ndt_mapping_config.yml";
+  std::string configfile_name = "/home/orangepi/slam_navigation/ndt_mapping/ndt_mapping_config.yml";
   YAML::Node config = YAML::LoadFile(configfile_name);
   _use_odom = config["use_odom"].as<bool>();
   _use_imu = config["use_imu"].as<bool>();
@@ -193,30 +186,67 @@ void NDTMapper::setConfig() {
   std::cout << "PARAM <====================================== " << std::endl;
 }
 
+// pcl::PointCloud<pcl::PointXYZI>::Ptr
+// NDTMapper::filterPoints(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input) {
+//   pcl::PointCloud<pcl::PointXYZI> tmp;
+//   pcl::PointCloud<pcl::PointXYZI> scan;
+//   pcl::PointXYZI p;
+//   double p_radius;
+//   tmp = *input; // pcl::fromROSMsg(*input, tmp);
+
+// #pragma omp parallel for num_threads(4)
+//   for(pcl::PointCloud<pcl::PointXYZI>::const_iterator item = tmp.begin();
+//   item != tmp.end(); item++) {
+//     p.x = (double)item->x;
+//     p.y = (double)item->y;
+//     p.z = (double)item->z;
+//     p.intensity = (double)item->intensity;
+
+//     p_radius = sqrt(pow(p.x, 2.0) + pow(p.y, 2.0));
+//     if (config_.min_scan_range < p_radius && p_radius < config_.max_scan_range)
+//       scan.push_back(p);
+//   }
+//   pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr(
+//       new pcl::PointCloud<pcl::PointXYZI>(scan));
+//   return scan_ptr;
+// }
+
 pcl::PointCloud<pcl::PointXYZI>::Ptr
 NDTMapper::filterPoints(const pcl::PointCloud<pcl::PointXYZI>::Ptr &input) {
-  pcl::PointCloud<pcl::PointXYZI> tmp;
-  pcl::PointCloud<pcl::PointXYZI> scan;
-  pcl::PointXYZI p;
-  double p_radius;
-  tmp = *input; // pcl::fromROSMsg(*input, tmp);
-
-#pragma omp parallel for num_threads(4)
-  for(pcl::PointCloud<pcl::PointXYZI>::const_iterator item = tmp.begin();
-  item != tmp.end(); item++) {
-    p.x = (double)item->x;
-    p.y = (double)item->y;
-    p.z = (double)item->z;
-    p.intensity = (double)item->intensity;
-
-    p_radius = sqrt(pow(p.x, 2.0) + pow(p.y, 2.0));
-    if (config_.min_scan_range < p_radius && p_radius < config_.max_scan_range)
-      scan.push_back(p);
+  // 1. 检查输入是否为空
+  if (!input || input->empty()) {
+    // 如果输入为空，返回一个空的点云指针
+    return pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>);
   }
-  pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr(
-      new pcl::PointCloud<pcl::PointXYZI>(scan));
+
+  // 2. 创建一个局部点云对象 scan，用于存储过滤后的结果
+  pcl::PointCloud<pcl::PointXYZI> scan;
+  // 预分配内存可以显著提高性能，避免在循环中多次重新分配内存
+  scan.reserve(input->size());
+
+  // 3. 使用标准的 for 循环遍历输入点云
+  // 这里我们使用基于范围的 for 循环 (C++11)，代码更简洁
+  for (const auto& item : *input) {
+    // 4. 计算点到原点的水平距离
+    double p_radius = sqrt(pow(item.x, 2.0) + pow(item.y, 2.0));
+
+    // 5. 根据距离进行过滤
+    if (config_.min_scan_range < p_radius && p_radius < config_.max_scan_range) {
+      // 如果点在有效范围内，则将其添加到结果点云中
+      scan.push_back(item);
+    }
+  }
+
+  // 6. (可选) 压缩点云的内部存储，释放未使用的预留内存
+  // 如果你的环境支持 C++11 且 PCL 版本较新，可以加上这一句
+  // scan.shrink_to_fit();
+
+  // 7. 创建一个新的智能指针，管理过滤后的点云数据，并返回
+  pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr(new pcl::PointCloud<pcl::PointXYZI>(scan));
   return scan_ptr;
 }
+
+
 
 Eigen::Matrix4f NDTMapper::calTranslation(
     const pcl::PointCloud<pcl::PointXYZI>::Ptr scan_ptr,
