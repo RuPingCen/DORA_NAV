@@ -1,0 +1,18 @@
+nodes:
+  # Livox MID360驱动节点
+  - id: livox_driver
+    path: modules/drivers/livox_driver/build/livox_dora_driver
+    inputs:
+      timer: dora/timer/millis/100
+    outputs:
+      - pointcloud
+      - imu
+
+  # 建图节点（替换为实际使用的 SLAM 算法节点）
+  # - id: slam_node
+  #   path: modules/mapping/<slam_node>_dora/build/<slam_node>_dora_node
+  #   inputs:
+  #     pointcloud: livox_driver/pointcloud
+  #     imu: livox_driver/imu
+  #   outputs:
+  #     - map_pcd   # 输出点云地图（保存到 maps/pcd/）

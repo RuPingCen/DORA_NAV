@@ -1,0 +1,83 @@
+nodes:
+  # Livox MID360驱动节点
+  # timer 仅作为 Dora dataflow 的锚点输入，驱动内部不使用它触发数据。
+  # 点云（~10 Hz）和 IMU（200 Hz）均由硬件信号量驱动的独立后台线程发布。
+  - id: livox_driver
+    path: ../build/modules/drivers/livox_driver/livox_dora_driver
+    outputs:
+      - pointcloud
+      - imu
+
+  # HDL定位节点
+  - id: hdl_localization
+    path: ../build/modules/localization/hdl_localization_dora/hdl_localization_dora_node
+    inputs:
+      pointcloud: livox_driver/pointcloud
+      imu: livox_driver/imu
+    outputs:
+      - pose
+
+  # 目标点发布节点
+  - id: goal_publisher
+    path: ../build/modules/interface/goal_publisher/goal_publisher_node
+    inputs:
+      timer: dora/timer/millis/10
+    outputs:
+      - goal
+
+#######################全局规划器#######################
+  # A* 全局路径规划节点
+  - id: astar_planner
+    path: ../build/modules/planner/global_planner/astar_planner_dora/astar_planner_dora_node
+    inputs:
+      pose: hdl_localization/pose
+      goal: goal_publisher/goal
+    outputs:
+      - path
+#######################################################
+
+#######################局部规划器#######################
+  # Pure Pursuit 局部路径跟踪节点
+  # - id: pure_pursuit
+  #   path: ../build/modules/planner/local_planner/pure_pursuit_dora/pure_pursuit_dora_node
+  #   inputs:
+  #     timer: dora/timer/millis/50
+  #     goal: goal_publisher/goal
+  #     path: astar_planner/path
+  #     pose: hdl_localization/pose
+  #     Odometry: mickrobotx4/Odometry
+  #   outputs:
+  #     - cmd_vel
+
+  # DWA 局部路径规划节点（路径跟踪 + 动态避障）
+  - id: dwa_planner
+    path: ../build/modules/planner/local_planner/dwa_planner_dora/dwa_planner_dora_node
+    inputs:
+      timer: dora/timer/millis/50
+      path: astar_planner/path
+      pose: hdl_localization/pose
+      pointcloud: livox_driver/pointcloud
+      Odometry: mickrobotx4/Odometry
+    outputs:
+      - cmd_vel
+      - dwa_trajectories
+
+#######################################################
+  # 底盘节点
+  - id: mickrobotx4
+    path: ../build/modules/chassis/dora_mickrobot/mickrobotx4
+    inputs:
+      timer: dora/timer/millis/10
+      # cmd_vel: pure_pursuit/cmd_vel
+      cmd_vel: dwa_planner/cmd_vel
+    outputs:
+      - Odometry
+
+  # Rerun可视化节点
+  - id: rerun_visualizer
+    path: ../build/modules/visualization/rerun_visualizer/rerun_visualizer
+    inputs:
+      pointcloud: livox_driver/pointcloud
+      pose: hdl_localization/pose
+      path: astar_planner/path
+      dwa_trajectories: dwa_planner/dwa_trajectories
