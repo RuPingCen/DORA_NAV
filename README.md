@@ -1,330 +1,150 @@
-# DORA_NAV
+# NavigationFramework
 
-DORA_NAV is an open-source autonomous navigation framework built on the [DORA](https://github.com/dora-rs/dora) dataflow orchestration framework. It supports differential-drive, omnidirectional, and Ackermann-type mobile robot chassis. The framework integrates sensor drivers, mapping, localization, perception, planning, and control into a complete point-to-point navigation pipeline.
+基于 [Dora-rs](https://github.com/dora-rs/dora) 框架的移动机器人自主导航系统，支持激光雷达定位、全局路径规划、局部动态避障和实时可视化。
 
-![Rerun Navigation Demo](images/dora_nav1.gif)
+## 系统架构
 
-The Rerun viewer displays the navigation pipeline in real-time:
-- **Red points** — Pre-built PCD point cloud map
-- **Cyan line** — Global waypoint path
-- **Blue line** — Planned local trajectory (from routing planner)
-- **Green points** — Live LiDAR pointcloud (transformed to map frame)
-- **Yellow box** — Robot body with heading arrow
-- **Orange trail** — Robot trajectory history
-
----
-
-## Architecture
-
-The system is organized as a DORA dataflow graph where each node runs as an independent process communicating through the DORA runtime.
+本项目采用模块化设计，通过 Dora 数据流框架实现各模块间的解耦通信：
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        DORA Runtime (v0.3.12)                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  ┌──────────────┐                                                   │
-│  │  Sensor Input │   tick (10ms)                                    │
-│  │  ────────────│──────────────┐                                   │
-│  │  mujoco_sim  │              │                                    │
-│  │  (or real    │    ┌─────────▼──────────┐                        │
-│  │   LiDAR+IMU) │    │   pointcloud       │                        │
-│  │              ├────►   imu_msg           │                        │
-│  │              │    │   ground_truth_pose │                        │
-│  └──┬───────┬───┘    └──┬──────────┬───────┘                        │
-│     │       │           │          │                                │
-│     │  SteeringCmd      │     ┌────▼─────────────────┐             │
-│     │  TrqBreCmd        │     │  hdl_localization     │             │
-│     │   (from control)  │     │  (NDT + UKF)          │             │
-│     │                   │     │  ─────────────────    │             │
-│     │                   │     │  IN: pointcloud,      │             │
-│     │                   │     │      imu_msg          │             │
-│     │                   │     │  OUT: cur_pose        │             │
-│     │                   │     └────────┬──────────────┘             │
-│     │                   │              │                            │
-│  ┌──▼───────────┐  ┌───▼──────┐  ┌────▼──────────────────┐        │
-│  │  Rerun       │  │ pub_road │  │ road_lane_publisher   │        │
-│  │  Visualizer  │  │ (static  │  │ (pose + lane → frenet)│        │
-│  │  ──────────  │  │  lanes)  │  │                       │        │
-│  │  pointcloud  │  └───┬──────┘  └────────┬──────────────┘        │
-│  │  raw_path    │      │                  │                        │
-│  │  cur_pose    │      │    road_lane     │  cur_pose_all          │
-│  └──────────────┘      │                  │                        │
-│                   ┌────▼──────────────────▼───────────────┐        │
-│                   │  task_pub_node ──► routing_planning    │        │
-│                   │  (road attrs)     (A* + Frenet)       │        │
-│                   │                   ────────────────     │        │
-│                   │                   OUT: raw_path,       │        │
-│                   │                        Request         │        │
-│                   └──────┬─────────────────┬──────────────┘        │
-│                          │                 │                        │
-│                   ┌──────▼──────┐   ┌──────▼──────┐                │
-│                   │ lat_control  │   │ lon_control  │               │
-│                   │ (Pure       │   │ (PID speed   │               │
-│                   │  Pursuit)   │   │  control)    │               │
-│                   │ OUT:        │   │ OUT:         │               │
-│                   │ SteeringCmd │   │ TrqBreCmd    │               │
-│                   └─────────────┘   └──────────────┘               │
-│                          │                 │                        │
-│                          └────────┬────────┘                        │
-│                                   │  (fed back to mujoco_sim       │
-│                                   │   or real chassis)              │
-│                                   ▼                                 │
-│                          ┌────────────────┐                        │
-│                          │  Vehicle/Sim   │                        │
-│                          └────────────────┘                        │
-└─────────────────────────────────────────────────────────────────────┘
+传感器层 → 定位层 → 规划层 → 执行层
+   ↓         ↓        ↓        ↓
+ Livox → HDL定位 → A*+DWA/pure_pursuit → 底盘控制
+   ↓                   ↓
+ IMU               Rerun可视化
 ```
 
-### Node Summary
+### 核心模块
 
-| Node | Algorithm | Key Libraries | Rate | Description |
-|------|-----------|---------------|------|-------------|
-| **mujoco_sim** | MuJoCo physics + raycasting | MuJoCo 3.5+, OpenMP | 1kHz sim, 10Hz LiDAR | Simulated LiDAR, IMU, ground truth pose |
-| **hdl_localization** | NDT scan matching + UKF | PCL, Eigen3, NDT-OMP | Real-time | Pose estimation against pre-built PCD map |
-| **pub_road** | Static publisher | DORA C API | 5Hz | Publishes pre-loaded road lane geometry |
-| **road_lane_publisher** | Coordinate transform | Eigen3 | Event-driven | Transforms lanes to vehicle-local Frenet frame |
-| **task_pub_node** | File reader | DORA C API | 50Hz | Publishes road attributes (speed limits, stops) |
-| **routing_planning** | A* + Frenet planning | Eigen3, nlohmann/json | Event-driven | Generates reference trajectory and speed requests |
-| **lat_controller** | Pure Pursuit | Eigen3 | 50Hz | Computes steering angle from path |
-| **lon_controller** | PID | DORA C API | Event-driven | Computes torque/brake from speed request |
-| **rerun** | Rerun streaming | Rerun SDK, PCL, Eigen3 | 10Hz | 3D visualization of full pipeline state |
+- **驱动模块** (`modules/drivers`)
+  - `livox_driver`: Livox MID360 激光雷达驱动，支持点云和 IMU数据发布
 
-### Shared Data Structures (`include/`)
+- **定位模块** (`modules/localization`)
+  - `hdl_localization`: 基于 NDT 的激光雷达定位，融合 IMU 数据
 
-```cpp
-// SlamPose.h — Localization output
-struct Pose2D_h { float x, y, theta; };
+- **规划模块** (`modules/planner`)
+  - `global_planner/astar_planner`: A* 全局路径规划器，支持路径平滑
+  - `local_planner/pure_pursuit`: 纯跟踪路径跟踪算法
+  - `local_planner/dwa_planner`: DWA 动态窗口法，支持动态避障和路径跟踪
 
-// Planning.h — Planning output
-struct Request_h {
-    uint8_t reques_type;   // FORWARD(0), BACK(1), STOP(2), AEB(3)
-    float run_speed;
-    float stop_distance;
-    float aeb_distance;
-};
+- **底盘模块** (`modules/chassis`)
+  - `dora_mickrobot`: mickrobot 底盘驱动，支持速度控制和里程计发布
 
-// Localization.h — Full pose with Frenet coordinates
-struct CurPose_h {
-    double x, y, theta;   // Cartesian pose
-    double s, d;           // Frenet coordinates along lane
-};
-```
+- **可视化模块** (`modules/visualization`)
+  - `rerun_visualizer`: 基于 Rerun 的实时 3D 可视化，显示点云地图、机器人位姿、全局路径和 DWA 预测轨迹
 
----
+- **接口模块** (`modules/interface`)
+  - `goal_publisher`: 目标点发布节点
 
-## Directory Structure
+### 工具
 
-```
-dora-nav/
-├── build_all.sh                  # Build all nodes
-├── dataflow_full_sim.yml         # Full simulation pipeline (run this)
-├── run.yml                       # Real hardware pipeline
-├── Waypoints.txt                 # Global path waypoints
-├── cmake/                        # Shared CMake configuration
-│   └── dora_config.cmake
-├── include/                      # Shared C/C++ headers
-│   ├── SlamPose.h
-│   ├── Planning.h
-│   ├── Localization.h
-│   └── imu_msg.h
-├── data/
-│   ├── map.pcd                   # Pre-built point cloud map
-│   └── path/trajectory.txt       # Recorded trajectory
-├── images/
-│   └── localization.png          # Rerun visualization screenshot
-├── simulation/mujoco_bridge/     # MuJoCo physics simulation
-│   ├── src/mujoco_sim_bridge.cpp
-│   └── models/robot_warehouse.xml
-├── localization/dora-hdl_localization/  # NDT+UKF localization
-├── mapping/ndt_mapping/          # Offline NDT map building
-├── map/
-│   ├── pub_road/                 # Static lane publisher
-│   └── road_line_publisher/      # Lane-to-Frenet transformer
-├── planning/
-│   ├── mission_planning/task_pub/ # Road attribute publisher
-│   └── routing_planning/          # A* + Frenet path planner
-├── control/vehicle_control/
-│   ├── lat_controller/           # Pure Pursuit steering
-│   └── lon_controller/           # PID speed control
-├── rerun/                        # Rerun 3D visualization
-│   ├── src/points_to_rerun.cpp
-│   └── data/map.pcd
-├── driver/                       # Sensor drivers (LiDAR, IMU, GNSS)
-├── peception/                    # Perception (ground filter, clustering, YOLO)
-└── vehicle/                      # Chassis drivers (Adora series)
-```
+- **地图转换工具** (`tools/map_trans`)
+  - PCD 点云地图转 PGM 栅格地图
 
----
+## 快速开始
 
-## Deployment Guide (Simulation Demo)
+### 环境要求
 
-### Prerequisites
+- **操作系统**: Linux (x86_64 / ARM64)
+- **编译器**: GCC 9+ / Clang 10+
+- **CMake**: 3.10+
+- **Python**: 3.8+ (用于 Dora CLI)
 
-| Dependency | Version | Install |
-|------------|---------|---------|
-| Ubuntu | 22.04+ | - |
-| CMake | 3.16+ | `sudo apt install cmake` |
-| Clang/GCC | C++17 | `sudo apt install clang build-essential` |
-| PCL | Latest | `sudo apt install libpcl-dev` |
-| Eigen3 | 3.x | `sudo apt install libeigen3-dev` |
-| Boost | Latest | `sudo apt install libboost-all-dev` |
-| yaml-cpp | Latest | `sudo apt install libyaml-cpp-dev` |
-| Python3-dev | 3.8+ | `sudo apt install python3-dev` |
-| MuJoCo | 3.5+ | `pip install mujoco` |
-| Rust/Cargo | Latest | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+### 依赖安装
 
-### Step 1: Install DORA Framework
+详细的环境配置请参考 [INSTALL.md](INSTALL.md)，主要依赖包括：
+
+- Dora-rs (数据流框架)
+- PCL 1.7+ (点云处理)
+- Eigen3 (线性代数)
+- Rerun SDK (可视化)
+- Livox-SDK2 (激光雷达驱动)
+- ndt_omp (NDT 配准加速)
+- serial (串口通信)
+- nlohmann_json (JSON 解析)
+- yaml-cpp (配置文件解析)
+
+### 编译
 
 ```bash
-# Install DORA CLI
-pip install dora-rs-cli
+# 克隆仓库
+git clone <repository_url>
+cd NavigationFramework
 
-# Clone and build DORA C API library
-cd ~/Public
-git clone https://github.com/dora-rs/dora.git
-cd dora
-cargo build -p dora-node-api-c --release
-# This produces: ~/Public/dora/target/release/libdora_node_api_c.a
-# Headers are in: ~/Public/dora/apis/c/node/
+# 编译第三方库（详见 INSTALL.md）
+# 编译 Livox-SDK2, ndt_omp, serial 等
+
+# 编译项目
+mkdir build && cd build
+cmake .. && make -j$(nproc)
 ```
 
-### Step 2: Install Rerun Viewer
+### 运行
 
 ```bash
-# Install Rerun SDK (C++ library)
-pip install rerun-sdk
-
-# Download and build the C++ SDK
-cd /tmp
-wget https://github.com/rerun-io/rerun/releases/download/0.29.2/rerun_cpp_sdk.zip
-mkdir -p rerun_cpp_sdk && cd rerun_cpp_sdk
-unzip ../rerun_cpp_sdk.zip
-mkdir -p build && cd build
-cmake ..
-make -j$(nproc)
+# 在项目根目录下运行
+dora run apps/run.yml
+# 发布测试目标点
+cd modules/interface/goal_publisher && python3 test_udp_sender.py
 ```
 
-### Step 3: Clone and Build DORA_NAV
+运行后系统将启动完整的导航流程：
+1. Livox 雷达采集点云和 IMU 数据
+2. HDL 定位节点输出机器人位姿
+3. 目标点发布后（目前是通过一个python脚本手动发布测试），A* 规划全局路径
+4. DWA 局部规划器跟踪路径并动态避障或者纯跟踪算法用于单纯的轨迹跟踪
+5. 底盘执行速度指令
+6. Rerun 实时可视化所有数据
 
-```bash
-cd ~/Public
-git clone https://github.com/RuPingCen/DORA_NAV.git dora-nav
-cd dora-nav
+### 配置文件
+
+- `apps/run.yml`: 完整导航系统配置
+- `apps/mapping.yml`: 建图模式配置（目前尚未完善）
+- `apps/test.yml`: 测试配置
+
+各模块的参数配置文件位于对应模块的 `config/` 目录下。
+
+## 项目结构
+
+```
+NavigationFramework/
+├── apps/                   # Dora 应用配置文件
+├── modules/                # 功能模块
+│   ├── drivers/           # 传感器驱动
+│   ├── localization/      # 定位模块
+│   ├── planner/           # 规划模块
+│   │   ├── global_planner/
+│   │   └── local_planner/
+│   ├── chassis/           # 底盘驱动
+│   ├── visualization/     # 可视化
+│   └── interface/         # 接口模块
+├── tools/                  # 离线工具
+│   └── map_trans/         # 地图转换工具
+├── third_party/           # 第三方库
+├── maps/                  # 地图文件
+├── docs/                  # 文档
+├── CMakeLists.txt         # 根 CMake 配置
+├── INSTALL.md             # 安装指南
+├── CHANGELOG.md           # 更新日志
+└── README.md              # 本文件
 ```
 
-Build all pipeline nodes:
+### 编译选项
+
+可以通过 CMake 选项控制模块编译：
 
 ```bash
-./build_all.sh
-```
-
-Or build individual nodes manually:
-
-```bash
-# Example: build the localization node
-cd localization/dora-hdl_localization
-mkdir -p build && cd build
 cmake .. \
-  -DCMAKE_PREFIX_PATH="$HOME/Public/dora-nav/cmake" \
-  -DDORA_INCLUDE_DIR="$HOME/Public/dora/apis/c/node" \
-  -DDORA_OPERATOR_DIR="$HOME/Public/dora/apis/c/operator" \
-  -DDORA_LIB_PATH="$HOME/Public/dora/target/release/libdora_node_api_c.a" \
-  -DDORA_NAV_ROOT="$HOME/Public/dora-nav"
-make -j$(nproc)
+  -DBUILD_LIVOX_DRIVER=ON \
+  -DBUILD_LOCALIZATION=ON \
+  -DBUILD_GLOBAL_PLANNER=ON \
+  -DBUILD_LOCAL_PLANNER=ON \
+  -DBUILD_VISUALIZATION=ON
 ```
 
-Build the MuJoCo simulation bridge:
+### 添加新模块
 
-```bash
-cd ~/Public/dora-nav/simulation/mujoco_bridge
-mkdir -p build && cd build
-cmake .. \
-  -DCMAKE_PREFIX_PATH="$HOME/Public/dora-nav/cmake" \
-  -DDORA_INCLUDE_DIR="$HOME/Public/dora/apis/c/node" \
-  -DDORA_OPERATOR_DIR="$HOME/Public/dora/apis/c/operator" \
-  -DDORA_LIB_PATH="$HOME/Public/dora/target/release/libdora_node_api_c.a" \
-  -DDORA_NAV_ROOT="$HOME/Public/dora-nav"
-make -j$(nproc)
-```
-
-Build the Rerun visualizer:
-
-```bash
-cd ~/Public/dora-nav/rerun
-mkdir -p build && cd build
-cmake .. \
-  -DCMAKE_PREFIX_PATH="$HOME/Public/dora-nav/cmake" \
-  -DDORA_INCLUDE_DIR="$HOME/Public/dora/apis/c/node" \
-  -DDORA_OPERATOR_DIR="$HOME/Public/dora/apis/c/operator" \
-  -DDORA_LIB_PATH="$HOME/Public/dora/target/release/libdora_node_api_c.a" \
-  -DDORA_NAV_ROOT="$HOME/Public/dora-nav"
-make -j$(nproc)
-```
-
-### Step 4: Verify Builds
-
-Confirm all required binaries exist:
-
-```bash
-ls -la simulation/mujoco_bridge/build/mujoco_sim_bridge
-ls -la localization/dora-hdl_localization/build/hdl_localization
-ls -la map/pub_road/build/pubroad
-ls -la map/road_line_publisher/build/road_lane_publisher_node
-ls -la planning/mission_planning/task_pub/build/task_pub_node
-ls -la planning/routing_planning/build/routing_planning_node
-ls -la control/vehicle_control/lat_controller/build/lat_controller_node
-ls -la control/vehicle_control/lon_controller/build/lon_controller_node
-ls -la rerun/build/to_rerun
-```
-
-### Step 5: Run the Simulation Demo
-
-**Important**: Run all `dora start` commands from the project root directory (`dora-nav/`) so that relative data file paths resolve correctly.
-
-```bash
-cd ~/Public/dora-nav
-
-# Start the DORA coordinator and daemon
-dora up
-
-# Launch the full simulation pipeline with Rerun visualization
-dora start dataflow_full_sim.yml --attach
-```
-
-The Rerun viewer window will open automatically, showing:
-- The pre-built point cloud map (red)
-- The global waypoint path (cyan)
-- Live simulated LiDAR scans (green) transformed by robot pose
-- The robot body (yellow box) with heading arrow
-- The robot's trajectory trail (orange)
-- The planned local path (blue)
-
-### Step 6: Stop the Demo
-
-Press `Ctrl+C` in the terminal, then:
-
-```bash
-dora destroy
-```
-
----
-
-## Dataflow Configurations
-
-| Dataflow YAML | Description | Sensor Source |
-|---------------|-------------|---------------|
-| `dataflow_full_sim.yml` | Full pipeline with ground truth pose | MuJoCo simulation |
-| `simulation/mujoco_bridge/dataflow_mujoco_sim.yml` | Full pipeline with NDT localization | MuJoCo simulation |
-| `run.yml` | Full pipeline for real robot | Physical LiDAR + IMU |
-
----
-
-## References
-
-- [DORA Framework](https://github.com/dora-rs/dora) — Dataflow-Oriented Robotic Architecture
-- [Rerun](https://www.rerun.io/) — Visualization SDK for robotics
-- [MuJoCo](https://mujoco.org/) — Physics simulation engine
-- [PCL](https://pointclouds.org/) — Point Cloud Library
-- [HDL Localization](https://github.com/koide3/hdl_localization) — 3D LiDAR localization using NDT
-- DORA and Rerun installation guide: [doc/dora_and_rerun_install.md](doc/dora_and_rerun_install.md)
+1. 在 `modules/` 下创建模块目录
+2. 编写 CMakeLists.txt，链接 `${DORA_NODE_API_LIB}`
+3. 在根 CMakeLists.txt 中添加 `add_subdirectory()`
+4. 在 `apps/*.yml` 中配置数据流连接

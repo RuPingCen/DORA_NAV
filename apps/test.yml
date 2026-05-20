@@ -1,0 +1,18 @@
+nodes:
+  # Livox MID360驱动节点
+  # timer 仅作为 Dora dataflow 的锚点输入，驱动内部不使用它触发数据。
+  # 点云（~10 Hz）和 IMU（200 Hz）均由硬件信号量驱动的独立后台线程发布。
+  - id: livox_driver
+    path: ../build/modules/drivers/livox_driver/livox_dora_driver
+    outputs:
+      - pointcloud
+      - imu
+
+  # HDL定位节点
+  - id: hdl_localization
+    path: ../build/modules/localization/hdl_localization_dora/hdl_localization_dora_node
+    inputs:
+      pointcloud: livox_driver/pointcloud
+      imu: livox_driver/imu
+    outputs:
+      - pose
